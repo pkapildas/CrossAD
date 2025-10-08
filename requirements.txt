@@ -7,3 +7,4 @@ matplotlib
 patool
 sktime
 tdqm
+TSB-AD

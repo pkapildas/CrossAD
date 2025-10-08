@@ -12,6 +12,7 @@ Extensive experiments conducted on seven real-world datasets using nine evaluati
 ### Folder structure
 ```
 .
+|-- README.md
 |-- configs
 |   |-- GECCO
 |   |-- MSL
@@ -20,6 +21,7 @@ Extensive experiments conducted on seven real-world datasets using nine evaluati
 |   |-- SMD
 |   |-- SWAN
 |   |-- SWAT
+|   |-- TSB-AD-U
 |   `-- UCR
 |-- data_provider
 |   |-- __init__.py
@@ -27,13 +29,21 @@ Extensive experiments conducted on seven real-world datasets using nine evaluati
 |   `-- data_provider_UCR.py
 |-- dataset
 |   |-- DETECT_META.csv
+|   |-- TSB-AD
 |   |-- UCR_Anomaly_FullData
 |   `-- data
 |-- exp
+|   |-- exp_TSBAD.py
 |   `-- exp_anomaly_detection.py
+|-- figs
+|   |-- affiliation.png
+|   |-- main.png
+|   `-- vus.png
 |-- models
 |   `-- CrossAD
+|-- requirements.txt
 |-- run.py
+|-- run_TSBAD.py
 |-- run_UCR.py
 |-- scripts
 |   |-- test
@@ -46,6 +56,7 @@ Extensive experiments conducted on seven real-world datasets using nine evaluati
 |   |-- SMD
 |   |-- SWAN
 |   |-- SWAT
+|   |-- TSB-AD-U
 |   `-- UCR
 `-- ts_ad_evaluation
     |-- __init__.py

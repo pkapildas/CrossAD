@@ -5,8 +5,13 @@ __pycache__/
 
 a_gt.npy
 a_test_energy.npy
+
 dataset/data/*.csv
 dataset/UCR_Anomaly_FullData/*.txt
+dataset/TSB-AD/*
 
-test_results/UCR/*.txt
-configs/UCR/*.txt
+test_results/TSB-AD-U/score
+test_results/TSB-AD-M/score
+
+checkpoints_(TSB-AD-U)/*
+checkpoints_(TSB-AD-M)/*
