@@ -12,10 +12,42 @@ import json
 
 
 from torch.utils.data import DataLoader
-from TSB_AD.utils.dataset import ReconstructDataset 
-
 
 warnings.filterwarnings('ignore')
+
+class ReconstructDataset(torch.utils.data.Dataset):
+    def __init__(self, data, window_size, stride=1, normalize=True):
+        super().__init__()
+        self.window_size = window_size
+        self.stride = stride
+        self.data = self._normalize_data(data) if normalize else data
+
+        self.univariate = self.data.shape[1] == 1
+        self.sample_num = max(0, (self.data.shape[0] - window_size) // stride + 1)
+        self.samples, self.targets = self._generate_samples()
+
+    def _normalize_data(self, data, epsilon=1e-8):
+        mean, std = np.mean(data, axis=0), np.std(data, axis=0)
+        std = np.where(std == 0, epsilon, std)  # Avoid division by zero
+        return (data - mean) / std
+
+    def _generate_samples(self):
+        data = torch.tensor(self.data, dtype=torch.float32)
+
+        if self.univariate:
+            data = data.squeeze()
+            X = torch.stack([data[i * self.stride : i * self.stride + self.window_size] for i in range(self.sample_num)])
+            X = X.unsqueeze(-1)
+        else:
+            X = torch.stack([data[i * self.stride : i * self.stride + self.window_size, :] for i in range(self.sample_num)])
+
+        return X, X
+
+    def __len__(self):
+        return self.sample_num
+
+    def __getitem__(self, index):
+        return self.samples[index], self.targets[index]
 
 class Exp_Anomaly_Detection():
     def __init__(self, args, id=0):
