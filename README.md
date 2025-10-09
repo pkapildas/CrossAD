@@ -78,6 +78,7 @@ Then place the downloaded data under the folder ```./dataset/```.
 ```
 dataset
 |   |-- DETECT_META.csv
+|   |-- TSB-AD
 |   |-- UCR_Anomaly_FullData
 |   `-- data
 ```
@@ -116,3 +117,13 @@ booktitle  = {ICLR},
 year       = {2025}
 }
 ```
+
+## Community Support | Acknowledgements
+
+This project is built on the shoulders of the open-source community.  
+Special thanks to the authors and contributors of the following repositories:
+
+- [decisionintelligence/TAB](https://github.com/decisionintelligence/TAB) – large-scale time-series anomaly benchmark with standardized data, metrics, and reproducible experiments.
+- [TheDatumOrg/TSB-AD](https://github.com/TheDatumOrg/TSB-AD) – a comprehensive benchmark and evaluation protocol for time-series anomaly detection.
+- [thuml/Time-Series-Library](https://github.com/thuml/Time-Series-Library) – comprehensive and reproducible deep-learning baselines for time-series tasks.  
+
