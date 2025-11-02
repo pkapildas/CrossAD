@@ -1,4 +1,4 @@
-This code is the official PyTorch implementation of our NeurIPS'25 Paper: CrossAD: Time Series Anomaly Detection with Cross-scale Associations and Cross-window Modeling.
+This code is the official PyTorch implementation of our NeurIPS'25 Paper: [CrossAD: Time Series Anomaly Detection with Cross-scale Associations and Cross-window Modeling](https://arxiv.org/abs/2510.12489).
 
 If you find this project helpful, please don't forget to give it a ⭐ Star to show your support. Thank you!
 
