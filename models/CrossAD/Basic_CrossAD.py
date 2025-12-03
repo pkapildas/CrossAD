@@ -33,8 +33,8 @@ class Basic_CrossAD(nn.Module):
         self.ms_p_lens = self.patch_embedding._dummy_forward(self.ms_t_lens)
         self.ms_t_lens_ = [PN * patch_len for PN in self.ms_p_lens]
 
-        self.scale_ind_mask = self.ms_utils.scale_ind_mask(self.ms_p_lens).cuda()
-        self.next_scale_mask = self.ms_utils.next_scale_mask(self.ms_p_lens).cuda()
+        self.register_buffer('scale_ind_mask', self.ms_utils.scale_ind_mask(self.ms_p_lens))
+        self.register_buffer('next_scale_mask', self.ms_utils.next_scale_mask(self.ms_p_lens))
 
         if "batch" in configs.norm.lower():
             encoder_norm = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))

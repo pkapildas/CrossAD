@@ -42,9 +42,15 @@ if __name__ == '__main__':
         print('Using GPU')
     else:
         if hasattr(torch.backends, "mps"):
-            args.device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+            if torch.backends.mps.is_available():
+                args.device = torch.device("mps")
+                args.gpu_type = 'mps'
+            else:
+                args.device = torch.device("cpu")
+                args.gpu_type = 'cpu'
         else:
             args.device = torch.device("cpu")
+            args.gpu_type = 'cpu'
         print('Using cpu or mps')
 
     if args.use_gpu and args.use_multi_gpu:
@@ -69,7 +75,10 @@ if __name__ == '__main__':
         exp.analysis()
 
     if args.gpu_type == 'mps':
-        torch.backends.mps.empty_cache()
+        try:
+            torch.backends.mps.empty_cache()
+        except AttributeError:
+            pass
     elif args.gpu_type == 'cuda':
         torch.cuda.empty_cache()
 

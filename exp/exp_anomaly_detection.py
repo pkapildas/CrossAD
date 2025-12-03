@@ -191,13 +191,13 @@ class Exp_Anomaly_Detection():
                 print('Updating learning rate to {}'.format(scheduler.get_last_lr()[0]))
 
         best_model_path = self.model_save_path + '/checkpoint.pth'
-        self.model.load_state_dict(torch.load(best_model_path))
+        self.model.load_state_dict(torch.load(best_model_path, map_location='cpu'))
 
     def test(self, **args):
         _, test_loader = self._get_data(flag='test')
 
         print('loading model...', end='')
-        self.model.load_state_dict(torch.load(os.path.join(self.model_save_path, 'checkpoint.pth')), strict=False)
+        self.model.load_state_dict(torch.load(os.path.join(self.model_save_path, 'checkpoint.pth'), map_location='cpu'), strict=False)
         print('done')
 
         self.model.eval()
@@ -247,7 +247,7 @@ class Exp_Anomaly_Detection():
         _, init_loader = self._get_data(flag='init')
 
         print('loading model...', end='')
-        self.model.load_state_dict(torch.load(os.path.join(self.model_save_path, 'checkpoint.pth')), strict=False)
+        self.model.load_state_dict(torch.load(os.path.join(self.model_save_path, 'checkpoint.pth'), map_location='cpu'), strict=False)
         print('done')
 
         self.model.eval()
@@ -273,7 +273,7 @@ class Exp_Anomaly_Detection():
         _, test_loader = self._get_data(flag='test')
 
         print('loading model...', end='')
-        self.model.load_state_dict(torch.load(os.path.join(self.model_save_path, 'checkpoint.pth')), strict=False)
+        self.model.load_state_dict(torch.load(os.path.join(self.model_save_path, 'checkpoint.pth'), map_location='cpu'), strict=False)
         print('done')
 
         self.model.eval()

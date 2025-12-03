@@ -1,10 +1,10 @@
 thop
 numpy
 pandas
-torch==1.10.0
+torch
 scikit-learn
 matplotlib
 patool
 sktime
-tdqm
+tqdm
 TSB-AD
