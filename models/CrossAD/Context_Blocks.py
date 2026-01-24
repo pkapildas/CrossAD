@@ -126,9 +126,6 @@ class ExtractorLayer(nn.Module):
         # attention
         self.cross_attention = cross_attention
         # ffn
-        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
-        # norm
         if "batch" in norm.lower():
             self.norm1 = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
             self.norm2 = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
@@ -136,7 +133,15 @@ class ExtractorLayer(nn.Module):
             self.norm1 = nn.LayerNorm(d_model)
             self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-        self.activation = F.relu if activation == "relu" else F.gelu
+        self.activation_type = activation
+        if self.activation_type == "swiglu":
+            self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv2 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv3 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+        else:
+            self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+            self.activation = F.relu if activation == "relu" else F.gelu
 
     def forward(self, q, local_repr, mask=None):
         # q: [bs, query_len, d_model]
@@ -150,7 +155,14 @@ class ExtractorLayer(nn.Module):
         q = self.norm1(q)                                                       # q: [bs x query_len x d_model]
 
         # ffn
-        y = self.dropout(self.activation(self.conv1(q.transpose(-1, 1))))
-        y = self.dropout(self.conv2(y).transpose(-1, 1))                        # y: [bs x query_len x d_model]
+        # ffn
+        if self.activation_type == "swiglu":
+            q_t = q.transpose(-1, 1)
+            gate = F.silu(self.conv1(q_t))
+            val = self.conv2(q_t)
+            y = self.dropout(self.conv3(gate * val).transpose(-1, 1))
+        else:
+            y = self.dropout(self.activation(self.conv1(q.transpose(-1, 1))))
+            y = self.dropout(self.conv2(y).transpose(-1, 1))                        # y: [bs x query_len x d_model]
 
         return self.norm2(q + y)

@@ -36,6 +36,8 @@ if __name__ == '__main__':
     parser.add_argument('--t', type=float, nargs='+', default=[0.1], help='')
     parser.add_argument('--metrics', type=str, nargs='+', default=['best_f1', 'auc', 'r_auc', 'vus'], help='')
 
+    parser.add_argument('--id', type=int, default=0, help='model id')
+
     args = parser.parse_args()
     if torch.cuda.is_available() and args.use_gpu:
         args.device = torch.device('cuda:{}'.format(args.gpu))
@@ -63,7 +65,7 @@ if __name__ == '__main__':
     print(args)
 
     # Exp
-    exp = Exp_Anomaly_Detection(args, id=0)
+    exp = Exp_Anomaly_Detection(args, id=args.id)
     if args.mode == "train":
         exp.train()
         exp.test()

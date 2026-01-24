@@ -38,9 +38,6 @@ class DecoderLayer(nn.Module):
         d_ff = d_ff or 4 * d_model
         self.self_attention = self_attention
         self.cross_attention = cross_attention
-        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
-        # norm
         if "batch" in norm.lower():
             self.norm1 = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
             self.norm2 = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
@@ -50,7 +47,15 @@ class DecoderLayer(nn.Module):
             self.norm2 = nn.LayerNorm(d_model)
             self.norm3 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-        self.activation = F.relu if activation == "relu" else F.gelu
+        self.activation_type = activation
+        if self.activation_type == "swiglu":
+            self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv2 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv3 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+        else:
+            self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+            self.activation = F.relu if activation == "relu" else F.gelu
 
     def forward(self, x, cross, x_mask=None, cross_mask=None):
         x_, x_attn_weights = self.self_attention(
@@ -67,8 +72,14 @@ class DecoderLayer(nn.Module):
         x = x + self.dropout(x_)
 
         y = x = self.norm2(x)
-        y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
-        y = self.dropout(self.conv2(y).transpose(-1, 1))
+        if self.activation_type == "swiglu":
+            x_t = y.transpose(-1, 1)
+            gate = F.silu(self.conv1(x_t))
+            val = self.conv2(x_t)
+            y = self.dropout(self.conv3(gate * val).transpose(-1, 1))
+        else:
+            y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
+            y = self.dropout(self.conv2(y).transpose(-1, 1))
 
         return self.norm3(x + y), x_attn_weights, cross_attn_weights
     
@@ -94,9 +105,6 @@ class EncoderLayer(nn.Module):
         super(EncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         self.attention = attention
-        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
-        # norm
         if "batch" in norm.lower():
             self.norm1 = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
             self.norm2 = nn.Sequential(Transpose(1,2), nn.BatchNorm1d(d_model), Transpose(1,2))
@@ -104,7 +112,15 @@ class EncoderLayer(nn.Module):
             self.norm1 = nn.LayerNorm(d_model)
             self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-        self.activation = F.relu if activation == "relu" else F.gelu
+        self.activation_type = activation
+        if self.activation_type == "swiglu":
+            self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv2 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv3 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+        else:
+            self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
+            self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
+            self.activation = F.relu if activation == "relu" else F.gelu
 
     def forward(self, x, attn_mask=None):
         x_, attn_weights = self.attention(
@@ -115,8 +131,14 @@ class EncoderLayer(nn.Module):
         x = self.norm1(x)
 
         y = x = self.norm1(x)
-        y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
-        y = self.dropout(self.conv2(y).transpose(-1, 1))
+        if self.activation_type == "swiglu":
+            x_t = y.transpose(-1, 1)
+            gate = F.silu(self.conv1(x_t))
+            val = self.conv2(x_t)
+            y = self.dropout(self.conv3(gate * val).transpose(-1, 1))
+        else:
+            y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
+            y = self.dropout(self.conv2(y).transpose(-1, 1))
 
         return self.norm2(x + y), attn_weights
 

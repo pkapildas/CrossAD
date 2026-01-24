@@ -27,8 +27,12 @@ class Basic_CrossAD(nn.Module):
 
         self.n_scales = len(ms_kernerls)
         self.ms_utils = MS_Utils(ms_kernerls, ms_method)
-        self.pos_embedding = PositionalEmbedding(d_model)
+        learnable_pe = getattr(configs, 'learnable_pe', False)
+        self.pos_embedding = PositionalEmbedding(d_model, learnable=learnable_pe)
         self.patch_embedding = PatchEmbedding(d_model, patch_len=patch_len, stride=patch_len, padding=(patch_len-1), dropout=0.)
+        
+        # Scale Attention
+        self.scale_attention = ScaleAttention(n_scales=self.n_scales, d_model=configs.d_model)
         self.ms_t_lens = self.ms_utils._dummy_forward(seq_len)
         self.ms_p_lens = self.patch_embedding._dummy_forward(self.ms_t_lens)
         self.ms_t_lens_ = [PN * patch_len for PN in self.ms_p_lens]
@@ -158,17 +162,13 @@ class Basic_CrossAD(nn.Module):
         ms_score = F.mse_loss(ms_x_dec, ms_gt, reduction="none")                                                    # score: [bs x ms_t x c]
         ms_score_list = self.ms_utils.split_2_list(ms_score, ms_t_lens=self.ms_t_lens, mode="decoder")              # score_list: [[bs x t1 x c] ... [bs x ti x c]]
 
-        for i in range(len(ms_score_list)-1):
-            loss_i = ms_score_list[i].permute(0, 2, 1)                                                              # [b x c x t_i]
-            up_loss_i = F.interpolate(loss_i, size=ms_score_list[-1].shape[1], mode='linear').permute(0, 2, 1)      # [b x t x c]
-            ms_score_list[-1] = ms_score_list[-1] + up_loss_i
-            
-        ms_score = ms_score_list[-1]                                                                                # [b x t x c]
-        return ms_score
+        # Dynamic Fusion
+        fused_score = self.scale_attention(ms_score_list)
+        return fused_score
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         ms_gt, ms_x_dec, query_latent_distances = self._forward(x_enc, x_mark_enc, x_dec, x_mark_dec)               # [bs x ms_t x c]
-        return F.mse_loss(ms_x_dec, ms_gt), torch.mean(query_latent_distances)
+        return F.mse_loss(ms_x_dec, ms_gt), torch.mean(query_latent_distances), ms_x_dec, ms_gt
 
     def infer(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         ms_gt, ms_x_dec, query_latent_distances = self._forward(x_enc, x_mark_enc, x_dec, x_mark_dec)               # [bs x ms_t x c]                              
@@ -236,23 +236,85 @@ class MS_Utils(nn.Module):
     def forward(self, x_enc):
         return self.down(x_enc)
     
+class ScaleAttention(nn.Module):
+    def __init__(self, n_scales, d_model):
+        super().__init__()
+        self.n_scales = n_scales
+        # Simple attention implementation to determine weight for each scale
+        # Input: list of scores [B, Ti, C]
+        # We process them to generate weights [B, n_scales, 1, 1]
+        
+        self.attn_mlp = nn.Sequential(
+            nn.Linear(n_scales, 64),
+            nn.Tanh(),
+            nn.Linear(64, n_scales),
+            nn.Softmax(dim=-1)
+        )
+        
+    def forward(self, ms_score_list):
+        # 1. Upsample all scores to the finest resolution
+        # finest scale is the last one
+        T_final = ms_score_list[-1].shape[1]
+        B, _, C = ms_score_list[-1].shape
+        
+        upsampled_scores = []
+        for i, score in enumerate(ms_score_list):
+            if score.shape[1] != T_final:
+                # [B, Ti, C] -> [B, C, Ti] -> Interpolate -> [B, C, T_final] -> [B, T_final, C]
+                s = score.permute(0, 2, 1)
+                s = F.interpolate(s, size=T_final, mode='linear')
+                s = s.permute(0, 2, 1)
+                upsampled_scores.append(s)
+            else:
+                upsampled_scores.append(score)
+        
+        # 2. Compute global context for attention
+        # We pool each scale's score to get a summary statistic [B, 1] per scale
+        # [B, n_scales]
+        scale_contexts = []
+        for s in upsampled_scores:
+            # Mean score per scale
+            mean_s = torch.mean(s, dim=(1, 2)) # [B]
+            scale_contexts.append(mean_s)
+        
+        scale_contexts = torch.stack(scale_contexts, dim=1) # [B, n_scales]
+        
+        # 3. Compute weights
+        weights = self.attn_mlp(scale_contexts) # [B, n_scales]
+        weights = weights.unsqueeze(-1).unsqueeze(-1) # [B, n_scales, 1, 1]
+        
+        # 4. Multiply and Sum
+        # Stack scores: [B, n_scales, T_final, C]
+        stacked_scores = torch.stack(upsampled_scores, dim=1)
+        
+        weighted_scores = stacked_scores * weights
+        fused_score = torch.sum(weighted_scores, dim=1) # [B, T_final, C]
+        
+        return fused_score
+    
 
 class PositionalEmbedding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+    def __init__(self, d_model, max_len=5000, learnable=False):
         super(PositionalEmbedding, self).__init__()
-        # Compute the positional encodings once in log space.
-        pe = torch.zeros(max_len, d_model).float()
-        pe.require_grad = False
+        
+        self.learnable = learnable
+        if self.learnable:
+            self.pe = nn.Parameter(torch.zeros(1, max_len, d_model))
+            nn.init.uniform_(self.pe, -0.02, 0.02)
+        else:
+            # Compute the positional encodings once in log space.
+            pe = torch.zeros(max_len, d_model).float()
+            pe.require_grad = False
 
-        position = torch.arange(0, max_len).float().unsqueeze(1)
-        div_term = (torch.arange(0, d_model, 2).float()
-                    * -(math.log(10000.0) / d_model)).exp()
+            position = torch.arange(0, max_len).float().unsqueeze(1)
+            div_term = (torch.arange(0, d_model, 2).float()
+                        * -(math.log(10000.0) / d_model)).exp()
 
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+            pe[:, 0::2] = torch.sin(position * div_term)
+            pe[:, 1::2] = torch.cos(position * div_term)
 
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+            pe = pe.unsqueeze(0)
+            self.register_buffer('pe', pe)
 
     def forward(self, t_len):
         return self.pe[:, :t_len]

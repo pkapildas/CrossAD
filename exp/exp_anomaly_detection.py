@@ -107,6 +107,9 @@ class Exp_Anomaly_Detection():
         elif train_configs.lradj == '1cycle':
             scheduler = other_args['scheduler']
             lr_adjust = {epoch: scheduler.get_last_lr()[0]}
+        elif train_configs.lradj == 'cosine_warm':
+            scheduler = other_args['scheduler']
+            lr_adjust = {epoch: scheduler.get_last_lr()[0]}
         
         if epoch in lr_adjust.keys():
             lr = lr_adjust[epoch]
@@ -120,7 +123,7 @@ class Exp_Anomaly_Detection():
         with torch.no_grad():
             for i, (batch_x, _) in enumerate(vali_loader):
                 batch_x = batch_x.float().to(self.device)
-                ms_loss, q_latent_distance = self.model(batch_x, None, None, None)
+                ms_loss, q_latent_distance, _, _ = self.model(batch_x, None, None, None)
                 loss = ms_loss
                 total_loss.append(loss.item())
         total_loss = np.average(total_loss)
@@ -143,6 +146,8 @@ class Exp_Anomaly_Detection():
                                                     epochs=self.train_configs.train_epochs, 
                                                     max_lr=self.train_configs.learning_rate
                                                     )
+        elif self.train_configs.lradj == 'cosine_warm':
+            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(model_optim, T_0=10, T_mult=2)
 
         time_now = time.time()
         for epoch in range(self.train_configs.train_epochs):
@@ -156,8 +161,21 @@ class Exp_Anomaly_Detection():
                 model_optim.zero_grad()
 
                 batch_x = batch_x.float().to(self.device)
-                ms_loss, q_latent_distance = self.model(batch_x, None, None, None)
-                loss = ms_loss
+                ms_loss, q_latent_distance, ms_x_dec, ms_gt = self.model(batch_x, None, None, None)
+                
+                # Memory Consistency Loss
+                memory_loss_weight = getattr(self.train_configs, 'memory_loss_weight', 0.0)
+                loss = ms_loss + memory_loss_weight * q_latent_distance
+
+                # Frequency Domain Consistency Loss
+                freq_loss_weight = getattr(self.train_configs, 'freq_loss_weight', 0.0)
+                if freq_loss_weight > 0:
+                    # FFT along the time dimension (dim=1)
+                    fft_pred = torch.fft.rfft(ms_x_dec, dim=1)
+                    fft_gt = torch.fft.rfft(ms_gt, dim=1)
+                    freq_loss = torch.mean(torch.abs(fft_pred - fft_gt))
+                    loss += freq_loss_weight * freq_loss
+
                 train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
@@ -171,7 +189,7 @@ class Exp_Anomaly_Detection():
                 loss.backward()
                 model_optim.step()
 
-                if self.train_configs.lradj == '1cycle':
+                if self.train_configs.lradj == '1cycle' or self.train_configs.lradj == 'cosine_warm':
                     self._adjust_learning_rate(model_optim, epoch + 1, self.train_configs, verbose=False, scheduler=scheduler)
                     scheduler.step()
 
@@ -185,7 +203,7 @@ class Exp_Anomaly_Detection():
                 print("Early stopping")
                 break
             
-            if self.train_configs.lradj != "1cycle":
+            if self.train_configs.lradj != "1cycle" and self.train_configs.lradj != "cosine_warm":
                 self._adjust_learning_rate(model_optim, epoch + 1, self.train_configs)
             else:
                 print('Updating learning rate to {}'.format(scheduler.get_last_lr()[0]))
