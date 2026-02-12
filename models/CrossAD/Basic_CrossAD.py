@@ -8,6 +8,7 @@ import json
 from .Attention_Blocks import *
 from .EncDec import *
 from .Context_Blocks import *
+from .Graph_Blocks import *
 
 class Configs:
     def __init__(self, json_path):
@@ -30,6 +31,16 @@ class Basic_CrossAD(nn.Module):
         learnable_pe = getattr(configs, 'learnable_pe', False)
         self.pos_embedding = PositionalEmbedding(d_model, learnable=learnable_pe)
         self.patch_embedding = PatchEmbedding(d_model, patch_len=patch_len, stride=patch_len, padding=(patch_len-1), dropout=0.)
+        
+        # Cross Variable Attention
+        self.use_cross_var = getattr(configs, 'use_cross_var', False)
+        if self.use_cross_var:
+            self.cross_var_attn = CrossVariableAttention(d_model=d_model, n_heads=configs.n_heads, dropout=configs.attn_dropout)
+        
+        # Dynamic Graph Neural Network
+        self.use_gnn = getattr(configs, 'use_gnn', True)
+        if self.use_gnn:
+            self.dynamic_gnn = DynamicGraphModule(d_model=d_model, dropout=configs.attn_dropout)
         
         # Scale Attention
         self.scale_attention = ScaleAttention(n_scales=self.n_scales, d_model=configs.d_model)
@@ -129,6 +140,14 @@ class Basic_CrossAD(nn.Module):
 
         # scale-independence encoder
         ms_x_enc, attn_weights = self.encoder(ms_x_enc, self.scale_ind_mask)                    # ms_x_enc_repr: [bs*c x ms_pn x d_model]
+
+        # Inter-Variable Dependency Learning
+        if self.use_cross_var:
+            ms_x_enc = self.cross_var_attn.forward_with_shape(ms_x_enc, bs, c)
+
+        # Dynamic Graph Neural Network
+        if self.use_gnn:
+            ms_x_enc = self.dynamic_gnn.forward_with_shape(ms_x_enc, bs, c)
 
         # period context
         if self.training:
@@ -235,7 +254,58 @@ class MS_Utils(nn.Module):
     
     def forward(self, x_enc):
         return self.down(x_enc)
-    
+
+
+class CrossVariableAttention(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        
+        # Self-Attention across Variables
+        self.attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, dropout=dropout, batch_first=True)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        # x: [BS*C, T, D]
+        # We need to reshape to [BS, C, T, D]
+        # But we don't know C here directly, we only know BS*C.
+        # We can assume x came from the encoder [BS*C, T, D]
+        
+        # Wait, inside Basic_CrossAD we know BS and C. 
+        # So we should pass BS and C to this forward method.
+        pass
+
+    def forward_with_shape(self, x, bs, c):
+        # x: [BS*C, T, D]
+        _, T, D = x.shape
+        
+        # 1. Reshape to [BS, C, T, D]
+        x_reshaped = x.view(bs, c, T, D)
+        
+        # 2. Pool over Time -> [BS, C, D]
+        # This represents the "summary" of each variable
+        x_summary = torch.mean(x_reshaped, dim=2)
+        
+        # 3. Cross-Variable Attention -> [BS, C, D]
+        # Query, Key, Value all from x_summary
+        attn_out, _ = self.attn(x_summary, x_summary, x_summary)
+        
+        # 4. Residual Connection + Norm
+        x_summary = self.norm(x_summary + self.dropout(attn_out))
+        
+        # 5. Broadcast back to Time -> [BS, C, T, D]
+        # flexible broadcasting: [BS, C, 1, D] expand to T
+        inter_var_context = x_summary.unsqueeze(2).expand(-1, -1, T, -1)
+        
+        # 6. Add to original features (Residual)
+        x_enhanced = x_reshaped + inter_var_context
+        
+        # 7. Flatten back to [BS*C, T, D]
+        return x_enhanced.reshape(bs*c, T, D)
+
+
 class ScaleAttention(nn.Module):
     def __init__(self, n_scales, d_model):
         super().__init__()
