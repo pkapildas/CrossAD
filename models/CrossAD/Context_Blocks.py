@@ -19,8 +19,8 @@ class ContextNet(nn.Module):
         self.querys = querys
         self.extractor = extractor
     
-    def forward(self, x_enc, local_repr, mask=None):
-        q_indices = self.router(x_enc)
+    def forward(self, x_enc, local_repr, mask=None, state=None):
+        q_indices = self.router(x_enc, state=state)
         q = torch.einsum('bn,nqd->bqd', q_indices, self.querys)                                         # q: [bs x query_len x d_model]
         
         query_latent_distances, context = self.extractor(q, local_repr, mask)
@@ -28,12 +28,17 @@ class ContextNet(nn.Module):
 
 
 class Router(nn.Module):
-    def __init__(self, seq_len, n_vars, n_query, topk=5):
+    def __init__(self, seq_len, n_vars, n_query, topk=5, d_state_input=None):
         super().__init__()
         self.k = topk
         self.fc = nn.Sequential(nn.Flatten(-2), nn.Linear(seq_len*n_vars, n_query))
+        
+        # Hybrid: Route based on Mamba State
+        self.d_state_input = d_state_input
+        if self.d_state_input is not None:
+             self.state_proj = nn.Linear(d_state_input, n_query)
 
-    def forward(self, x):
+    def forward(self, x, state=None):
         bs, t, c = x.shape
         # fft
         x_freq = torch.fft.rfft(x, dim=1, n=t)
@@ -48,6 +53,13 @@ class Router(nn.Module):
         x = torch.fft.irfft(x_freq, dim=1, n=t)
         # mlp
         logits = self.fc(x)                                     # logits: [bs x n_query]
+        
+        # Hybrid: Add state contribution
+        if state is not None and hasattr(self, 'state_proj'):
+            # state: [bs, D_inner, d_state]
+            state_flat = state.reshape(bs, -1)
+            logits = logits + self.state_proj(state_flat)
+
         # gumbel softmax
         q_indices = F.gumbel_softmax(logits, tau=1, hard=True)  # q_indices: [bs x n_query]
 

@@ -9,6 +9,7 @@ from .Attention_Blocks import *
 from .EncDec import *
 from .Context_Blocks import *
 from .Graph_Blocks import *
+from .SSM_Blocks import *
 
 class Configs:
     def __init__(self, json_path):
@@ -58,36 +59,77 @@ class Basic_CrossAD(nn.Module):
             encoder_norm = nn.LayerNorm(d_model)
             decoder_norm = nn.LayerNorm(d_model)
 
-        self.encoder=Encoder(
-            layers=[
-                EncoderLayer(
-                    attention=AttentionLayer(ScaledDotProductAttention(attn_dropout=configs.attn_dropout), d_model=configs.d_model, n_heads=configs.n_heads, proj_dropout=configs.proj_dropout),
-                    d_model=configs.d_model,
-                    d_ff=configs.d_ff,
-                    norm=configs.norm,
-                    dropout=configs.ff_dropout,
-                    activation=configs.activation
-                ) for _ in range(configs.e_layers)
-            ],
-            norm_layer=encoder_norm
-        )
-        self.decoder=Decoder(
-            layers=[
-                DecoderLayer(
-                    self_attention=AttentionLayer(ScaledDotProductAttention(attn_dropout=configs.attn_dropout), d_model=configs.d_model, n_heads=configs.n_heads, proj_dropout=configs.proj_dropout),
-                    cross_attention=AttentionLayer(ScaledDotProductAttention(attn_dropout=configs.attn_dropout), d_model=configs.d_model, n_heads=configs.n_heads, proj_dropout=configs.proj_dropout),
-                    d_model=configs.d_model,
-                    d_ff=configs.d_ff,
-                    norm=configs.norm,
-                    dropout=configs.ff_dropout,
-                    activation=configs.activation
-                ) for _ in range(configs.d_layers)
-            ],
-            norm_layer=decoder_norm,
-            projection=nn.Sequential(nn.Linear(configs.d_model, configs.patch_len), nn.Flatten(-2))
-        )
+        self.use_ssm = getattr(configs, 'use_ssm', True)
+        if self.use_ssm:
+             self.encoder=SSMEncoder(
+                layers=[
+                    SSMEncoderLayer(
+                        d_model=configs.d_model,
+                        d_state=getattr(configs, 'd_state', 16),
+                        d_conv=getattr(configs, 'd_conv', 4),
+                        expand=getattr(configs, 'expand', 2),
+                        dropout=configs.ff_dropout,
+                        activation=configs.activation
+                    ) for _ in range(configs.e_layers)
+                ],
+                norm_layer=encoder_norm
+            )
+             self.decoder=SSMDecoder(
+                layers=[
+                    SSMDecoderLayer(
+                        d_model=configs.d_model,
+                        cross_attention=AttentionLayer(ScaledDotProductAttention(attn_dropout=configs.attn_dropout), d_model=configs.d_model, n_heads=configs.n_heads, proj_dropout=configs.proj_dropout),
+                        d_state=getattr(configs, 'd_state', 16),
+                        d_conv=getattr(configs, 'd_conv', 4),
+                        expand=getattr(configs, 'expand', 2),
+                        d_ff=configs.d_ff,
+                        dropout=configs.ff_dropout,
+                        activation=configs.activation
+                    ) for _ in range(configs.d_layers)
+                ],
+                norm_layer=decoder_norm,
+                projection=nn.Sequential(nn.Linear(configs.d_model, configs.patch_len), nn.Flatten(-2))
+            )
+        else:
+            self.encoder=Encoder(
+                layers=[
+                    EncoderLayer(
+                        attention=AttentionLayer(ScaledDotProductAttention(attn_dropout=configs.attn_dropout), d_model=configs.d_model, n_heads=configs.n_heads, proj_dropout=configs.proj_dropout),
+                        d_model=configs.d_model,
+                        d_ff=configs.d_ff,
+                        norm=configs.norm,
+                        dropout=configs.ff_dropout,
+                        activation=configs.activation
+                    ) for _ in range(configs.e_layers)
+                ],
+                norm_layer=encoder_norm
+            )
+            self.decoder=Decoder(
+                layers=[
+                    DecoderLayer(
+                        self_attention=AttentionLayer(ScaledDotProductAttention(attn_dropout=configs.attn_dropout), d_model=configs.d_model, n_heads=configs.n_heads, proj_dropout=configs.proj_dropout),
+                        cross_attention=AttentionLayer(ScaledDotProductAttention(attn_dropout=configs.attn_dropout), d_model=configs.d_model, n_heads=configs.n_heads, proj_dropout=configs.proj_dropout),
+                        d_model=configs.d_model,
+                        d_ff=configs.d_ff,
+                        norm=configs.norm,
+                        dropout=configs.ff_dropout,
+                        activation=configs.activation
+                    ) for _ in range(configs.d_layers)
+                ],
+                norm_layer=decoder_norm,
+                projection=nn.Sequential(nn.Linear(configs.d_model, configs.patch_len), nn.Flatten(-2))
+            )
+
+        # Calculate Mamba state dim for Hybrid Router
+        d_state_input = None
+        if self.use_ssm:
+             d_state = getattr(configs, 'd_state', 16)
+             expand = getattr(configs, 'expand', 2)
+             d_inner = int(expand * configs.d_model)
+             d_state_input = d_inner * d_state
+
         self.context_net=ContextNet(
-            router = Router(seq_len=self.ms_t_lens[-1], n_vars=1, n_query=configs.n_query, topk=configs.topk),
+            router = Router(seq_len=self.ms_t_lens[-1], n_vars=1, n_query=configs.n_query, topk=configs.topk, d_state_input=d_state_input),
             querys = nn.Parameter(torch.randn(configs.n_query, configs.query_len, configs.d_model)),
             extractor = Extractor(
                 layers=[
@@ -139,7 +181,12 @@ class Basic_CrossAD(nn.Module):
         ms_x_enc = ms_x_enc + ms_pos_emb                                                        # ms_x_enc: [bs*c x ms_pn x d_model]
 
         # scale-independence encoder
-        ms_x_enc, attn_weights = self.encoder(ms_x_enc, self.scale_ind_mask)                    # ms_x_enc_repr: [bs*c x ms_pn x d_model]
+        last_state = None
+        if self.use_ssm:
+             ms_x_enc, states = self.encoder(ms_x_enc, self.scale_ind_mask)
+             last_state = states[-1]
+        else:
+             ms_x_enc, attn_weights = self.encoder(ms_x_enc, self.scale_ind_mask)
 
         # Inter-Variable Dependency Learning
         if self.use_cross_var:
@@ -151,7 +198,7 @@ class Basic_CrossAD(nn.Module):
 
         # period context
         if self.training:
-            query_latent_distances, context = self.context_net(router_input, ms_x_enc)              # context: [N*query_len x d_model]
+            query_latent_distances, context = self.context_net(router_input, ms_x_enc, state=last_state)              # context: [N*query_len x d_model]
             context = context.unsqueeze(0).expand(bs*c, -1, -1)                                     # context: [bs*c x N*query_len x d_model]
             query_latent_distances = query_latent_distances.reshape(bs, c, 1)                       # query_latent_distances: [bs x c x 1]
             query_latent_distances = query_latent_distances.permute(0, 2, 1)                        # query_latent_distances: [bs x 1 x c]
