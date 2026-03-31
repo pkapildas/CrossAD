@@ -1,10 +1,10 @@
 {
-    "train_epochs": 20,
+    "train_epochs": 50,
     "batch_size": 128,
-    "optim": "adam",
-    "learning_rate": 1e-4,
+    "optim": "adamw",
+    "learning_rate": 2e-4,
     "lradj": "cosine_warm",
-    "patience": 5,
+    "patience": 10,
     "memory_loss_weight": 0.1,
-    "freq_loss_weight": 0.1
+    "freq_loss_weight": 0.3
 }

@@ -91,22 +91,26 @@ class Extractor(nn.Module):
         g_flat = self.context.reshape(-1, q_len*d)                                                      # [N x query_len*d_model]
         N, D = g_flat.shape
 
-        distances = (
-            torch.sum(q_flat**2, dim=1, keepdim=True) + 
-            torch.sum(g_flat**2, dim=1) -
-            2 * torch.matmul(q_flat, g_flat.t())
-        )                                                                                               # [bs x N] soft
-        # distances = torch.sum((q_flat.unsqueeze(1)-g_flat.unsqueeze(0))**2, dim=-1)                   
-        indices = torch.argmin(distances.float(), dim=-1)                                               # [bs] 
-        encodings = F.one_hot(indices, N).float()                                                       # [bs x N] hard
+        # --- Soft Cross-Attention Memory Routing ---
+        # 1. Scaled Dot-Product Similarity
+        # Scale down by sqrt(D) to stabilize softmax gradients
+        scores = torch.matmul(q_flat, g_flat.t()) / (D ** 0.5)                                          # [bs x N]
+        
+        # 2. Continuous Soft-Weights
+        encodings = F.softmax(scores, dim=-1)                                                           # [bs x N] soft weights
+        
+        # 3. Dynamic Blended Context
         q_context = torch.einsum("bn,nqd->bqd", [encodings, self.context])                              # [bs x query_len x d_model]
+        
+        # We also distribute the query updates softly across the memory bank
         q_hat = torch.einsum("bn,bqd->nqd", [encodings, q])                                             # [N x query_len x d_model]
         
-        # query_latent_distances
+        # 4. Latent Distance (Still measures how far the blended context is from true q)
         query_latent_distances = torch.mean(F.mse_loss(q_context.detach(), q, reduction="none"), dim=(1, 2))    # [bs]
 
         if self.training:
             with torch.no_grad():
+                # Smooth EMA accumulating the softly distributed weights
                 self.ema_count = self.decay * self.ema_count + (1 - self.decay) * torch.sum(encodings, dim=0)   # [N]
                 n = torch.sum(self.ema_count)
                 self.ema_count = (self.ema_count + self.epsilon) / (n + D * self.epsilon) * n

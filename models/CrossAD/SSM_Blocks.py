@@ -114,10 +114,34 @@ class MambaBlock(nn.Module):
         out = self.out_proj(y)
         return self.dropout(out), h_last
 
-class SSMEncoderLayer(nn.Module):
-    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1, activation="gelu"):
+class BiMambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
         super().__init__()
-        self.mamba = MambaBlock(d_model, d_state, d_conv, expand, dropout)
+        self.forward_mamba = MambaBlock(d_model, d_state, d_conv, expand, dropout)
+        self.backward_mamba = MambaBlock(d_model, d_state, d_conv, expand, dropout)
+        
+    def forward(self, x):
+        # Forward pass
+        y_fwd, h_fwd = self.forward_mamba(x)
+        
+        # Backward pass
+        x_rev = torch.flip(x, dims=[1])
+        y_bwd_rev, h_bwd = self.backward_mamba(x_rev)
+        y_bwd = torch.flip(y_bwd_rev, dims=[1])
+        
+        # Combine
+        y = y_fwd + y_bwd
+        h_last = h_fwd + h_bwd
+        
+        return y, h_last
+
+class SSMEncoderLayer(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1, activation="gelu", use_bimamba=False):
+        super().__init__()
+        if use_bimamba:
+            self.mamba = BiMambaBlock(d_model, d_state, d_conv, expand, dropout)
+        else:
+            self.mamba = MambaBlock(d_model, d_state, d_conv, expand, dropout)
         self.norm = nn.LayerNorm(d_model) # Pre-norm usually
         
     def forward(self, x, attn_mask=None):
@@ -146,11 +170,14 @@ class SSMEncoder(nn.Module):
         return x, states
 
 class SSMDecoderLayer(nn.Module):
-    def __init__(self, d_model, cross_attention, d_state=16, d_conv=4, expand=2, d_ff=None, dropout=0.1, activation="gelu"):
+    def __init__(self, d_model, cross_attention, d_state=16, d_conv=4, expand=2, d_ff=None, dropout=0.1, activation="gelu", use_bimamba=False):
         super().__init__()
         
         # Self-Mixing (Mamba)
-        self.self_mixing = MambaBlock(d_model, d_state, d_conv, expand, dropout)
+        if use_bimamba:
+            self.self_mixing = BiMambaBlock(d_model, d_state, d_conv, expand, dropout)
+        else:
+            self.self_mixing = MambaBlock(d_model, d_state, d_conv, expand, dropout)
         self.norm1 = nn.LayerNorm(d_model)
         
         # Cross-Attention (Standard)

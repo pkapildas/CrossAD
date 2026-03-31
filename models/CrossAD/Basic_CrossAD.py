@@ -11,11 +11,141 @@ from .Context_Blocks import *
 from .Graph_Blocks import *
 from .SSM_Blocks import *
 
+def info_nce_loss(features_a, features_b, temperature=0.1):
+    features_a = F.normalize(features_a, dim=-1)
+    features_b = F.normalize(features_b, dim=-1)
+    
+    sim_matrix = torch.matmul(features_a, features_b.T) / temperature
+    labels = torch.arange(features_a.size(0), device=features_a.device)
+    
+    loss_a = F.cross_entropy(sim_matrix, labels)
+    loss_b = F.cross_entropy(sim_matrix.T, labels)
+    return (loss_a + loss_b) / 2
+
+class GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.alpha, None
+
+def grad_reverse(x, alpha=1.0):
+    return GradReverse.apply(x, alpha)
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Input: [B, 1, ms_t]
+        self.net = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm1d(32),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.AdaptiveAvgPool1d(1)
+        )
+        self.fc = nn.Linear(128, 1)
+
+    def forward(self, x):
+        features = self.net(x).squeeze(-1) # -> [B, 128]
+        return self.fc(features).squeeze(-1) # -> [B]
+
 class Configs:
     def __init__(self, json_path):
         with open(json_path) as f:
             configs = json.load(f)
             self.__dict__.update(configs)
+
+
+class RevIN(nn.Module):
+    def __init__(self, num_features: int = None, eps=1e-5, affine=False):
+        super(RevIN, self).__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.affine = affine
+        if self.affine:
+            self._init_affine_param()
+
+    def _init_affine_param(self):
+        if self.num_features is not None:
+            self.affine_weight = nn.Parameter(torch.ones(self.num_features))
+            self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
+        else:
+            self.affine_weight = None
+            self.affine_bias = None
+
+    def forward(self, x, mode:str):
+        if mode == 'norm':
+            self._get_statistics(x)
+            x = self._normalize(x)
+        elif mode == 'denorm':
+            x = self._denormalize(x)
+        else: raise NotImplementedError
+        return x
+
+    def _get_statistics(self, x):
+        dim2reduce = tuple(range(1, x.ndim-1))
+        self.mean = torch.mean(x, dim=dim2reduce, keepdim=True).detach()
+        self.stdev = torch.sqrt(torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps).detach()
+
+    def _normalize(self, x):
+        x = x - self.mean
+        x = x / self.stdev
+        if self.affine:
+            if self.affine_weight is None:
+                self.num_features = x.shape[-1]
+                self.affine_weight = nn.Parameter(torch.ones(self.num_features, device=x.device))
+                self.affine_bias = nn.Parameter(torch.zeros(self.num_features, device=x.device))
+            x = x * self.affine_weight
+            x = x + self.affine_bias
+        return x
+
+    def _denormalize(self, x):
+        if self.affine:
+            x = x - self.affine_bias
+            x = x / (self.affine_weight + self.eps**2)
+        x = x * self.stdev
+        x = x + self.mean
+        return x
+
+
+class FourierBranch(nn.Module):
+    def __init__(self, d_model, modes=32):
+        super(FourierBranch, self).__init__()
+        self.d_model = d_model
+        self.modes = modes
+        # Complex weights (mode mixing)
+        self.weights = nn.Parameter(torch.randn(modes, d_model, d_model, dtype=torch.cfloat) * (1 / (d_model * modes)))
+
+    def forward(self, x):
+        # x: [B, L, D_model]
+        B, L, D = x.shape
+        # Real FFT over sequence length
+        x_ft = torch.fft.rfft(x, dim=1) # [B, L//2 + 1, D_model]
+        
+        # Determine number of modes to use for this specific sequence
+        modes = min(self.modes, x_ft.shape[1])
+        
+        # Initialize output Fourier representation
+        out_ft = torch.zeros_like(x_ft)
+        
+        # Truncate input and weights to active modes
+        x_ft_modes = x_ft[:, :modes, :]
+        weights = self.weights[:modes, :, :]
+        
+        # Mix the active frequencies (Einsum: B M D, M D C -> B M C)
+        out_ft[:, :modes, :] = torch.einsum('bmd,mdc->bmc', x_ft_modes, weights)
+        
+        # Inverse Real FFT
+        x_out = torch.fft.irfft(out_ft, n=L, dim=1)
+        return x_out
 
 
 class Basic_CrossAD(nn.Module):
@@ -43,6 +173,29 @@ class Basic_CrossAD(nn.Module):
         if self.use_gnn:
             self.dynamic_gnn = DynamicGraphModule(d_model=d_model, dropout=configs.attn_dropout)
         
+        # Parallel Frequency (Fourier) Branch
+        self.use_fourier = getattr(configs, 'use_fourier', False)
+        if self.use_fourier:
+            self.fourier_branch = FourierBranch(d_model=d_model, modes=getattr(configs, 'modes', 32))
+            self.fourier_norm = nn.LayerNorm(d_model)
+
+        # Contrastive Learning
+        self.use_contrastive = getattr(configs, 'use_contrastive', False)
+        self.contrastive_weight = getattr(configs, 'contrastive_weight', 0.1)
+
+        # Advanced Training Tasks and Losses
+        self.use_mae = getattr(configs, 'use_mae', False)
+        self.mask_ratio = getattr(configs, 'mask_ratio', 0.25)
+        self.use_trend_loss = getattr(configs, 'use_trend_loss', False)
+        self.trend_weight = getattr(configs, 'trend_weight', 0.5)
+
+        # Adversarial Training Module
+        self.use_adv = getattr(configs, 'use_adv', False)
+        self.adv_weight = getattr(configs, 'adv_weight', 0.1)
+        if self.use_adv:
+            self.discriminator = Discriminator()
+            self.bce_loss = nn.BCEWithLogitsLoss()
+
         # Scale Attention
         self.scale_attention = ScaleAttention(n_scales=self.n_scales, d_model=configs.d_model)
         self.ms_t_lens = self.ms_utils._dummy_forward(seq_len)
@@ -60,6 +213,7 @@ class Basic_CrossAD(nn.Module):
             decoder_norm = nn.LayerNorm(d_model)
 
         self.use_ssm = getattr(configs, 'use_ssm', True)
+        use_bimamba = getattr(configs, 'use_bimamba', False)
         if self.use_ssm:
              self.encoder=SSMEncoder(
                 layers=[
@@ -69,7 +223,8 @@ class Basic_CrossAD(nn.Module):
                         d_conv=getattr(configs, 'd_conv', 4),
                         expand=getattr(configs, 'expand', 2),
                         dropout=configs.ff_dropout,
-                        activation=configs.activation
+                        activation=configs.activation,
+                        use_bimamba=use_bimamba
                     ) for _ in range(configs.e_layers)
                 ],
                 norm_layer=encoder_norm
@@ -84,7 +239,8 @@ class Basic_CrossAD(nn.Module):
                         expand=getattr(configs, 'expand', 2),
                         d_ff=configs.d_ff,
                         dropout=configs.ff_dropout,
-                        activation=configs.activation
+                        activation=configs.activation,
+                        use_bimamba=use_bimamba
                     ) for _ in range(configs.d_layers)
                 ],
                 norm_layer=decoder_norm,
@@ -128,6 +284,10 @@ class Basic_CrossAD(nn.Module):
              d_inner = int(expand * configs.d_model)
              d_state_input = d_inner * d_state
 
+        self.use_revin = getattr(configs, 'use_revin', False)
+        if self.use_revin:
+             self.revin = RevIN(affine=False)
+
         self.context_net=ContextNet(
             router = Router(seq_len=self.ms_t_lens[-1], n_vars=1, n_query=configs.n_query, topk=configs.topk, d_state_input=d_state_input),
             querys = nn.Parameter(torch.randn(configs.n_query, configs.query_len, configs.d_model)),
@@ -153,6 +313,9 @@ class Basic_CrossAD(nn.Module):
     def _forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         bs, t, c = x_enc.shape
 
+        if getattr(self, 'use_revin', False):
+            x_enc = self.revin(x_enc, 'norm')
+
         # CI
         x_enc = x_enc.permute(0, 2, 1)                                                          
         x_enc = x_enc.reshape(bs*c, t, 1)                                                       # x_enc: [bs*c x t x 1]
@@ -163,6 +326,14 @@ class Basic_CrossAD(nn.Module):
         ms_gt = self.ms_utils.concat_sampling_list(ms_x_enc_list[1:] + [x_enc])                 # ms_gt: [bs*c x ms_t x 1]
         ms_gt = ms_gt.reshape(bs, c, -1)                                                        # ms_gt: [bs x c x ms_t]
         ms_gt = ms_gt.permute(0, 2, 1)                                                          # ms_gt: [bs x ms_t x c]
+
+        # MAE Temporal Masking (Unsupervised Extrapolation Task)
+        if self.training and getattr(self, 'use_mae', False):
+            for i in range(len(ms_x_enc_list)):
+                t_i = ms_x_enc_list[i].shape[1]
+                # Binomial threshold mask
+                mask = (torch.rand(bs*c, t_i, 1, device=x_enc.device) > self.mask_ratio).float()
+                ms_x_enc_list[i] = ms_x_enc_list[i] * mask
 
         # patch_embedding + pos_embedding
         x_enc = x_enc.permute(0, 2, 1)                                                          # x_enc: [bs*c x 1 x t]
@@ -180,6 +351,10 @@ class Basic_CrossAD(nn.Module):
 
         ms_x_enc = ms_x_enc + ms_pos_emb                                                        # ms_x_enc: [bs*c x ms_pn x d_model]
 
+        # Parallel Fourier Branch Extract
+        if getattr(self, 'use_fourier', False):
+            ms_x_enc_fourier = self.fourier_branch(ms_x_enc)
+
         # scale-independence encoder
         last_state = None
         if self.use_ssm:
@@ -187,6 +362,10 @@ class Basic_CrossAD(nn.Module):
              last_state = states[-1]
         else:
              ms_x_enc, attn_weights = self.encoder(ms_x_enc, self.scale_ind_mask)
+
+        # Fourier Feature Fusion
+        if getattr(self, 'use_fourier', False):
+            ms_x_enc = ms_x_enc + self.fourier_norm(ms_x_enc_fourier)
 
         # Inter-Variable Dependency Learning
         if self.use_cross_var:
@@ -209,6 +388,17 @@ class Basic_CrossAD(nn.Module):
 
         # next-scale decoder
         ms_x_enc_list = self.ms_utils.split_2_list(ms_x_enc, ms_t_lens=self.ms_p_lens, mode="encoder")
+
+        # --- Contrastive Loss ---
+        contrastive_loss = torch.tensor(0.0, device=x_enc.device)
+        if getattr(self, 'use_contrastive', False) and self.training:
+            pooled_scales = [torch.mean(scale, dim=1) for scale in ms_x_enc_list]
+            loss_cl = 0.0
+            for i in range(len(pooled_scales) - 1):
+                loss_cl += info_nce_loss(pooled_scales[i], pooled_scales[i+1], temperature=0.1)
+            contrastive_loss = loss_cl / max(1, len(pooled_scales) - 1)
+        # ------------------------
+
         ms_x_dec_list = self.ms_utils.up(ms_x_enc_list, ms_t_lens=self.ms_p_lens)
         ms_x_dec = self.ms_utils.concat_sampling_list(ms_x_dec_list)                                                # ms_x_dec_repr: [bs*c x up(ms_pn) x d_model]
 
@@ -222,7 +412,11 @@ class Basic_CrossAD(nn.Module):
             ms_x_dec_list[i] = ms_x_dec_list[i][:, :self.ms_t_lens[i+1]]
         ms_x_dec = self.ms_utils.concat_sampling_list(ms_x_dec_list)                                                # ms_x_dec: [bs x ms_t x c]
         
-        return ms_gt, ms_x_dec, query_latent_distances
+        if getattr(self, 'use_revin', False):
+            ms_x_dec = self.revin(ms_x_dec, 'denorm')
+            ms_gt = self.revin(ms_gt, 'denorm')
+
+        return ms_gt, ms_x_dec, query_latent_distances, contrastive_loss
     
     def _ms_anomaly_score(self, ms_x_dec, ms_gt):
         ms_score = F.mse_loss(ms_x_dec, ms_gt, reduction="none")                                                    # score: [bs x ms_t x c]
@@ -233,11 +427,42 @@ class Basic_CrossAD(nn.Module):
         return fused_score
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
-        ms_gt, ms_x_dec, query_latent_distances = self._forward(x_enc, x_mark_enc, x_dec, x_mark_dec)               # [bs x ms_t x c]
-        return F.mse_loss(ms_x_dec, ms_gt), torch.mean(query_latent_distances), ms_x_dec, ms_gt
+        ms_gt, ms_x_dec, query_latent_distances, cl_loss = self._forward(x_enc, x_mark_enc, x_dec, x_mark_dec)               # [bs x ms_t x c]
+        loss_mse = F.mse_loss(ms_x_dec, ms_gt)
+        if getattr(self, 'use_contrastive', False):
+            loss_mse = loss_mse + getattr(self, 'contrastive_weight', 0.1) * cl_loss
+            
+        if getattr(self, 'use_trend_loss', False):
+            diff_dec = ms_x_dec[:, 1:, :] - ms_x_dec[:, :-1, :]
+            diff_gt = ms_gt[:, 1:, :] - ms_gt[:, :-1, :]
+            loss_trend = F.mse_loss(diff_dec, diff_gt)
+            loss_mse = loss_mse + getattr(self, 'trend_weight', 0.5) * loss_trend
+            
+        if getattr(self, 'use_adv', False):
+            # Adversarial Loss via Gradient Reversal
+            # ms_gt and ms_x_dec are [bs, ms_t, c]
+            bs_f, ms_t_f, c_f = ms_gt.shape
+            # Format for Discriminator -> [B, 1, ms_t], where B = bs * c
+            real_data = ms_gt.permute(0, 2, 1).reshape(bs_f * c_f, 1, ms_t_f)
+            fake_data = ms_x_dec.permute(0, 2, 1).reshape(bs_f * c_f, 1, ms_t_f)
+            
+            # Real pass
+            pred_real = self.discriminator(real_data)
+            loss_d_real = self.bce_loss(pred_real, torch.ones_like(pred_real))
+            
+            # Fake pass with Gradient Reversal
+            fake_data_grl = grad_reverse(fake_data, alpha=1.0)
+            pred_fake = self.discriminator(fake_data_grl)
+            loss_d_fake = self.bce_loss(pred_fake, torch.zeros_like(pred_fake))
+            
+            # Total Adversarial Loss
+            loss_adv = (loss_d_real + loss_d_fake) / 2
+            loss_mse = loss_mse + getattr(self, 'adv_weight', 0.1) * loss_adv
+            
+        return loss_mse, torch.mean(query_latent_distances), ms_x_dec, ms_gt
 
     def infer(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
-        ms_gt, ms_x_dec, query_latent_distances = self._forward(x_enc, x_mark_enc, x_dec, x_mark_dec)               # [bs x ms_t x c]                              
+        ms_gt, ms_x_dec, query_latent_distances, _ = self._forward(x_enc, x_mark_enc, x_dec, x_mark_dec)               # [bs x ms_t x c]                              
         return self._ms_anomaly_score(ms_x_dec, ms_gt), query_latent_distances                                      # [bs, t, c], [bs, 1, c]
 
 
